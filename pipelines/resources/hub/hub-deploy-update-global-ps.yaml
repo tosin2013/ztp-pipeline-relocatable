@@ -1,10 +1,13 @@
 apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
-  name: hub-deploy-acm
+  name: hub-deploy-update-global-ps
   annotations:
     description: |
-      This task will deploy RHACM on the Hub Cluster.
+      This task will deploy the Disconnected Internal registry.
+      Then will perform the OCP and OLM sync.
+      Update the Global PullSecret for every edgecluster with the proper credentials
+      and in the end create a Tarball to be shared with every edgecluster provisioned.
 spec:
   workspaces:
     - name: ztp
@@ -34,22 +37,22 @@ spec:
         value: $(params.edgeclusters-config)
       - name: KUBECONFIG
         value: "$(workspaces.ztp.path)/kubeconfig"
-      - name: DEPLOY_ACM_DIR
-        value: "deploy-acm"
+      - name: DEPLOY_REGISTRY_DIR
+        value: "deploy-disconnected-registry"
       - name: SHARED_DIR
         value: "shared-utils"
       - name: MOCK
         value: $(params.mock)
   steps:
-    - name: deploy-acm
+    - name: update-global-pullsecret
       image: "$(params.ztp-container-image)"
       imagePullPolicy: Always
       script: |
         #!/usr/bin/bash
 
         if [[ "${MOCK}" == 'false' ]]; then
-          cd ${WORKDIR}/${DEPLOY_ACM_DIR}
-          ./deploy.sh
+          cd ${WORKDIR}/${DEPLOY_REGISTRY_DIR}
+          ./update-global-pullsecret.sh 'hub'
         else
-          echo "Deploy ACM: Mock mode on"
+          echo "Mirror Update Pull Secret: Mock mode on"
         fi

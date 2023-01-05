@@ -73,7 +73,7 @@ Here `eth0` is the network card name, and it can be different for different comp
 BOOTPROTO=static
 IPADDR=192.168.7.21
 NETMASK=255.255.255.0
-GATEWAY=192.168.0.1
+GATEWAY=192.168.7.1
 DNS1=192.168.7.10
 ----
 +
@@ -112,9 +112,9 @@ This `kubeadmin` username and password was created at the factory and should hav
 This new user account is granted `cluster-admin` privileges and should be used rather than the factory created `kubeadmin` account.
 ====
 
-.. In the **API** screen assign the IP address that will be used for API traffic. A default value is assigned but you are free to update this.
+.. In the **API** screen assign the IP address that will be used for API traffic. The default value should be replaced with an IP from the respective subnet.
 
-.. In the **Ingress** screen assign the IP address that will be used for new routes and traffic managed by the ingress controller. A default value is assigned but you are free to update this.
+.. In the **Ingress** screen assign the IP address that will be used for new routes and traffic managed by the ingress controller. The default value should be replaced with an IP from the respective subnet.
 
 .. Optional: Enter the name of base domain for your edge cluster (e.g. yourdomain.com)
 +
@@ -142,7 +142,7 @@ If the domain name was not changed, then upon success you should get to a page w
 In case the domain name was changed, you will be redirected to the edge-cluster-setup page of the new domain, where you will have to login agan.
 ====
 
-.. Under **Settings** you have the option to delete the kubeadmin user and to change the values of the **API address**, **Ingress address** and the previously configured **Domain**.
+.. Under **Settings** you have the option to delete the kubeadmin user and to change the values of the **API address**, **Ingress address** and the **Domain name**.
 +
 [NOTE]
 ====

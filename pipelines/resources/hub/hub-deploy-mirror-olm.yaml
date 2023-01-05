@@ -1,10 +1,13 @@
 apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
-  name: edgecluster-deploy-disconnected-registry-edgeclusters-ocp
+  name: hub-deploy-mirror-olm
   annotations:
     description: |
-      Will perform the OCP sync, based on the SYNC parameter.
+      This task will deploy the Disconnected Internal registry.
+      Then will perform the OCP and OLM sync.
+      Update the Global PullSecret for every edgecluster with the proper credentials
+      and in the end create a Tarball to be shared with every edgecluster provisioned.
 spec:
   workspaces:
     - name: ztp
@@ -41,34 +44,21 @@ spec:
       - name: MOCK
         value: $(params.mock)
   steps:
-
-    - name: mirror-ocp
+    - name: mirror-olm
       image: "$(params.ztp-container-image)"
-      imagePullPolicy: Always
-      resources:
-        requests:
-          memory: "250Mi"
-          cpu: "250m"
-        limits:
-          memory: 8Gi
-          cpu: 10000m
+      imagePullPolicy: Always   
       securityContext:
-        privileged: false
+        capabilities:
+          add: ["SETFCAP"]
+        privileged: true
         runAsUser: 0
-      volumeMounts:
-      - mountPath: /var/lib/containers
-        name: lib-containers
       script: |
         #!/usr/bin/bash
 
         if [[ "${MOCK}" == 'false' ]]; then
           cd ${WORKDIR}/${DEPLOY_REGISTRY_DIR}
-          echo "Starting OpenShift Image Mirroring"
-          ./ocp-sync.sh 'edgecluster'
+          echo "Starting OLM Catalog Image Mirroring Step"
+          ./olm-sync.sh 'hub'
         else
-          echo "Deploy Mirror OCP Edge-cluster: Mock mode on"
+          echo "Mirror OLM: Mock mode on"
         fi
-
-  volumes:
-  - name: lib-containers
-    emptyDir: {}

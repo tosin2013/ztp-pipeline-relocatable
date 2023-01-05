@@ -70,9 +70,9 @@ Tasks Completed: 3 (Failed: 1, Cancelled 0), Skipped: 3 ("step-mirror-olm" exite
  NAME              VALUE
  ∙ kubeconfig      /root/.kcli/clusters/test-ci/auth/kubeconfig
  ∙ edgeclusters-config   config:
-  OC_OCP_VERSION: '4.10.9'
-  OC_ACM_VERSION: '2.4'
-  OC_OCS_VERSION: '4.9'
+  OC_OCP_VERSION: '4.10.38'
+  OC_ACM_VERSION: '2.5'
+  OC_ODF_VERSION: '4.10'
 edgeclusters:
  ∙ ztp-container-image   quay.io/ztpfw/pipeline:latest
 
@@ -95,7 +95,7 @@ edgeclusters:
 ⏭️  Skipped Tasks
 
  NAME
- ∙ deploy-acm
+ ∙ deploy-mce
  ∙ deploy-icsp-hub
  ∙ deploy-hub-config
 ----
@@ -145,9 +145,9 @@ Message
 
  NAME              VALUE
  ∙ edgeclusters-config   config:
-  OC_OCP_VERSION: '4.10.9'
-  OC_ACM_VERSION: '2.4'
-  OC_OCS_VERSION: '4.9'
+  OC_OCP_VERSION: '4.10.38'
+  OC_ACM_VERSION: '2.5'
+  OC_ODF_VERSION: '4.10'
 edgeclusters:
  ∙ kubeconfig            /root/.kcli/clusters/test-ci/auth/kubeconfig
  ∙ ztp-container-image   quay.io/ztpfw/pipeline:latest
@@ -188,7 +188,7 @@ $ oc get pod -n edgecluster-deployer
 [source,terminal]
 ----
 NAME                                                              READY   STATUS      RESTARTS   AGE
-deploy-ztp-hub-run-rwh4j-deploy-acm-k92kf-pod-85n7t               0/1     Completed   0          159m
+deploy-ztp-hub-run-rwh4j-deploy-mce-k92kf-pod-85n7t               0/1     Completed   0          159m
 deploy-ztp-hub-run-rwh4j-deploy-disconnected-registry-8j9-rk469   0/4     Completed   0          3h2m
 deploy-ztp-hub-run-rwh4j-deploy-httpd-server-fw49r-pod-lhkxf      0/1     Completed   0          3h2m
 deploy-ztp-hub-run-rwh4j-deploy-hub-config-vmgf2-pod-cjg72        0/1     Completed   0          149m

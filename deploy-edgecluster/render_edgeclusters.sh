@@ -56,15 +56,22 @@ create_edgecluster_definitions() {
     # Set vars
     export CHANGE_EDGE_NAME=${cluster}
     grab_api_ingress ${cluster}
+    export TPM_ENABLED=$(yq eval ".edgeclusters[${edgeclusternumber}].${cluster}.config.tpm // false" ${EDGECLUSTERS_FILE})
     export CHANGE_EDGE_MASTER_PUB_INT_M0=$(yq eval ".edgeclusters[${edgeclusternumber}].${cluster}.master0.nic_int_static" ${EDGECLUSTERS_FILE})
     export CHANGE_EDGE_MASTER_MGMT_INT_M0=$(yq eval ".edgeclusters[${edgeclusternumber}].${cluster}.master0.nic_ext_dhcp" ${EDGECLUSTERS_FILE})
-    export DATA_PUB_INT_M0=$(echo "${CHANGE_EDGE_MASTER_PUB_INT_M0}" | base64 -w0)
     export CHANGE_BASEDOMAIN=${HUB_BASEDOMAIN}
     export IGN_OVERRIDE_API_HOSTS=$(echo -n "${CHANGE_EDGE_API} ${EDGE_API_NAME}" | base64 -w0)
     export IGN_CSR_APPROVER_SCRIPT=$(base64 csr_autoapprover.sh -w0)
     export IGN_CHANGE_DEF_ROUTE_SCRIPT=$(base64 change_def_route.sh -w0)
+
+    if [[ ${CHANGE_EDGE_MASTER_PUB_INT_M0} == "null" ]]; then
+    	export OVS_IFACE_HINT=$(echo "${CHANGE_EDGE_MASTER_MGMT_INT_M0}.102" | base64 -w0)
+    else
+    	export OVS_IFACE_HINT=$(echo "${CHANGE_EDGE_MASTER_PUB_INT_M0}" | base64 -w0)
+    fi
+
     export JSON_STRING_CFG_OVERRIDE_INFRAENV='{"ignition":{"version":"3.1.0"},"storage":{"files":[{"path":"/etc/hosts","append":[{"source":"data:text/plain;base64,'${IGN_OVERRIDE_API_HOSTS}'"}]}]}}'
-    export JSON_STRING_CFG_OVERRIDE_BMH='{"ignition":{"version":"3.2.0"},"systemd":{"units":[{"name":"csr-approver.service","enabled":true,"contents":"[Unit]\nDescription=CSR Approver\nAfter=network.target\n\n[Service]\nUser=root\nType=oneshot\nExecStart=/bin/bash -c /opt/bin/csr-approver.sh\n\n[Install]\nWantedBy=multi-user.target"},{"name":"change-def-route.service","enabled":true,"contents":"[Unit]\nDescription=Change-Default-Route\nAfter=network.target\n\n[Service]\nUser=root\nType=simple\nExecStart=/bin/bash -c \"/opt/bin/change_def_route.sh '${CHANGE_EDGE_MASTER_MGMT_INT_M0}'\"\n\n[Install]\nWantedBy=multi-user.target"},{"name":"crio-wipe.service","mask":true}]},"storage":{"files":[{"path":"/opt/bin/csr-approver.sh","mode":492,"append":[{"source":"data:text/plain;base64,'${IGN_CSR_APPROVER_SCRIPT}'"}]},{"path":"/opt/bin/change_def_route.sh","mode":492,"append":[{"source":"data:text/plain;base64,'${IGN_CHANGE_DEF_ROUTE_SCRIPT}'"}]},{"path":"/var/lib/ovnk/iface_default_hint","mode":492,"override":true,"contents":{"source":"data:text/plain;base64,'${DATA_PUB_INT_M0}'"}}]}}'
+    export JSON_STRING_CFG_OVERRIDE_BMH='{"ignition":{"version":"3.2.0"},"systemd":{"units":[{"name":"csr-approver.service","enabled":true,"contents":"[Unit]\nDescription=CSR Approver\nAfter=network.target\n\n[Service]\nUser=root\nType=oneshot\nExecStart=/bin/bash -c /opt/bin/csr-approver.sh\n\n[Install]\nWantedBy=multi-user.target"},{"name":"change-def-route.service","enabled":true,"contents":"[Unit]\nDescription=Change-Default-Route\nBefore=ovs-configuration.service\nWants=NetworkManager-wait-online.service\nAfter=NetworkManager-wait-online.service\n\n[Service]\nUser=root\nType=simple\nExecStart=/bin/bash -c \"/opt/bin/change_def_route.sh\"\n\n[Install]\nWantedBy=multi-user.target"},{"name":"crio-wipe.service","mask":true}]},"storage":{"files":[{"path":"/opt/bin/csr-approver.sh","mode":492,"append":[{"source":"data:text/plain;base64,'${IGN_CSR_APPROVER_SCRIPT}'"}]},{"path":"/opt/bin/change_def_route.sh","mode":492,"append":[{"source":"data:text/plain;base64,'${IGN_CHANGE_DEF_ROUTE_SCRIPT}'"}]},{"path":"/var/lib/ovnk/iface_default_hint","mode":492,"override":true,"contents":{"source":"data:text/plain;base64,'${OVS_IFACE_HINT}'"}}]}}'
     # Generate the edgecluster definition yaml
     cat <<EOF >${OUTPUTDIR}/${cluster}-cluster.yaml
 ---
@@ -127,15 +134,19 @@ kind: AgentClusterInstall
 metadata:
   name: $CHANGE_EDGE_NAME
   namespace: $CHANGE_EDGE_NAME
-  annotations:
-      agent-install.openshift.io/install-config-overrides: '{"networking":{"networkType":"OpenshiftSDN"}}'
 spec:
-  diskEncryption:
-    mode: tpmv2
-    enableOn: all
   clusterDeploymentRef:
     name: $CHANGE_EDGE_NAME
 EOF
+
+if [ "${TPM_ENABLED}" == true ]; then
+cat <<EOF >>${OUTPUTDIR}/${cluster}-cluster.yaml
+  diskEncryption:
+    mode: tpmv2
+    enableOn: all
+EOF
+fi
+
     if [ "${NUM_M}" -eq "1" ]; then
         cat <<EOF >>${OUTPUTDIR}/${cluster}-cluster.yaml
   manifestsConfigMapRef:
@@ -152,7 +163,6 @@ EOF
   apiVIP: "$CHANGE_EDGE_API"
   ingressVIP: "$CHANGE_EDGE_INGRESS"
   networking:
-    networkType: OpenShiftSDN
     clusterNetwork:
       - cidr: "$CHANGE_EDGE_CLUSTER_NET_CIDR"
         hostPrefix: $CHANGE_EDGE_CLUSTER_NET_PREFIX
@@ -200,29 +210,6 @@ spec:
           cluster-name: "$CHANGE_EDGE_NAME"
   pullSecretRef:
     name: $CHANGE_EDGE_PULL_SECRET_NAME
----
-apiVersion: agent.open-cluster-management.io/v1
-kind: KlusterletAddonConfig
-metadata:
-  name: $CHANGE_EDGE_NAME
-  namespace: $CHANGE_EDGE_NAME
-spec:
-  clusterName: $CHANGE_EDGE_NAME
-  clusterNamespace: $CHANGE_EDGE_NAME
-  clusterLabels:
-    name: $CHANGE_EDGE_NAME
-    cloud: Baremetal
-  applicationManager:
-    argocdCluster: false
-    enabled: true
-  certPolicyController:
-    enabled: true
-  iamPolicyController:
-    enabled: true
-  policyController:
-    enabled: true
-  searchCollector:
-    enabled: true
 ---
 apiVersion: cluster.open-cluster-management.io/v1
 kind: ManagedCluster
@@ -313,6 +300,8 @@ EOF
        vlan:
          base-iface: $CHANGE_EDGE_MASTER_MGMT_INT
          id: 102
+       ipv6:
+         enabled: false
        ipv4:
          enabled: true
          address:
@@ -329,6 +318,8 @@ EOF
          auto-negotiation: true
          duplex: full
          speed: 1000
+       ipv6:
+         enabled: false
        ipv4:
          enabled: true
          address:
@@ -350,21 +341,6 @@ EOF
             done
         fi
 
-        cat <<EOF >>${OUTPUT}
-   routes:
-     config:
-       - destination: $CHANGE_EDGE_MASTER_PUB_INT_ROUTE_DEST
-         next-hop-address: $CHANGE_EDGE_MASTER_PUB_INT_GW
-EOF
-        if [[ ${CHANGE_EDGE_MASTER_PUB_INT_MAC} == "null" ]]; then
-            cat <<EOF >>${OUTPUT}
-         next-hop-interface: $CHANGE_EDGE_MASTER_MGMT_INT.102
-EOF
-        else
-            cat <<EOF >>${OUTPUT}
-         next-hop-interface: $CHANGE_EDGE_MASTER_PUB_INT
-EOF
-        fi
         if [[ ${IGN_IFACES} != "null" ]]; then
             for IFACE in $(echo ${IGN_IFACES}); do
                 echo "Ignoring route for: ${IFACE}"

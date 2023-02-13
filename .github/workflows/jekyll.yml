@@ -7,6 +7,7 @@ on:
     paths:
       - 'website/**'
       - 'documentation/**'
+      - '.github/workflows/jekyll.yml'
   schedule:
     - cron:  '0 0 * * *'
 
@@ -17,6 +18,7 @@ concurrency:
 jobs:
   jekyll:
     runs-on: ubuntu-latest
+
     steps:
     - uses: actions/checkout@v3
 
@@ -28,7 +30,16 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gems-
 
-    - uses: iranzo/gh-pages-jekyll-action@1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GHAREPO }}
-        SOURCE_FOLDER: website
+    - name: Install dependencies
+      run: sudo apt-get -y update && sudo apt-get install -y ruby ruby-dev  && sudo gem install bundler && sudo bundle install
+
+    - name: Build asciidoc
+      run: bash -x build.sh
+
+    - uses: helaili/jekyll-action@v2
+      with:
+        target_path: /
+        keep_history: true
+        target_branch: gh-pages
+        token: ${{ secrets.GITHUB_TOKEN }}
+        jekyll_src: website

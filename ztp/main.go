@@ -15,23 +15,33 @@ License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal"
-	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/edgecluster"
-	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/version"
+	createcmd "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/create"
+	deletecmd "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/delete"
+	devcmd "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/dev"
+	versioncmd "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/version"
+	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/exit"
 )
 
 func main() {
+	// Create a context:
+	ctx := context.Background()
+
 	// Create the tool:
 	tool, err := internal.NewTool().
-		Args(os.Args...).
-		In(os.Stdin).
-		Out(os.Stdout).
-		Err(os.Stderr).
-		Command(version.Command).
-		Command(edgecluster.Command).
+		SetEnv(os.Environ()).
+		AddArgs(os.Args...).
+		SetIn(os.Stdin).
+		SetOut(os.Stdout).
+		SetErr(os.Stderr).
+		AddCommand(createcmd.Cobra).
+		AddCommand(devcmd.Cobra).
+		AddCommand(versioncmd.Cobra).
+		AddCommand(deletecmd.Cobra).
 		Build()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err.Error())
@@ -39,9 +49,14 @@ func main() {
 	}
 
 	// Run the tool:
-	err = tool.Run()
+	err = tool.Run(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-		os.Exit(1)
+		exitErr, ok := err.(exit.Error)
+		if ok {
+			os.Exit(exitErr.Code())
+		} else {
+			fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+			os.Exit(1)
+		}
 	}
 }

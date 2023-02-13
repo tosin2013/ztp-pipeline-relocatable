@@ -12,24 +12,26 @@ implied. See the License for the specific language governing permissions and lim
 License.
 */
 
-package version
+package cmd
 
 import (
 	"bytes"
-	"testing"
+	"context"
 
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
 
 	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal"
+	versioncmd "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/cmd/version"
 )
 
-func TestCmd(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "Version command")
-}
-
 var _ = Describe("Version command", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
 	It("Prints the build commit", func() {
 		// Prepare buffers to capture the output:
 		inBuffer := &bytes.Buffer{}
@@ -38,14 +40,14 @@ var _ = Describe("Version command", func() {
 
 		// Run the command:
 		tool, err := internal.NewTool().
-			Args("oc-ztp", "version").
-			Command(Command).
-			In(inBuffer).
-			Out(outBuffer).
-			Err(errBuffer).
+			AddArgs("oc-ztp", "version").
+			AddCommand(versioncmd.Cobra).
+			SetIn(inBuffer).
+			SetOut(outBuffer).
+			SetErr(errBuffer).
 			Build()
 		Expect(err).ToNot(HaveOccurred())
-		err = tool.Run()
+		err = tool.Run(ctx)
 		Expect(err).ToNot(HaveOccurred())
 
 		// Check the otuput. Note that we expect unknown commit and time because the test

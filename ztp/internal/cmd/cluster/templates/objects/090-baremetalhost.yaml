@@ -1,0 +1,26 @@
+{{ range .Cluster.Nodes }}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: {{ .Hostname }}
+  namespace: {{ $.Cluster.Name }}
+  labels:
+    infraenvs.agent-install.openshift.io: {{ $.Cluster.Name }}
+  annotations:
+    inspect.metal3.io: disabled
+    bmac.agent-install.openshift.io/hostname: {{ .Hostname }}
+    {{ if eq .Kind "Worker" }}
+    bmac.agent-install.openshift.io/role: worker
+    {{ end }}
+    bmac.agent-install.openshift.io/ignition-config-overrides: {{ execute "files/cfg-override-bmh.json" . | json }}
+spec:
+  online: false
+  bootMACAddress: {{ .ExternalNIC.MAC }}
+  rootDeviceHints:
+    deviceName: {{ .RootDisk }}
+  bmc:
+    disableCertificateVerification: true
+    address: {{ .BMC.URL }}
+    credentialsName: {{ .Hostname }}-bmc-secret
+{{ end}}

@@ -1,0 +1,57 @@
+{
+  "ignition": {
+    "version": "3.2.0"
+  },
+  "systemd": {
+    "units": [
+      {
+        "name": "csr-approver.service",
+        "enabled": true,
+        "contents": {{ execute "files/csr-approver.service" . | json }}
+      },
+      {
+        "name": "crio-wipe.service",
+        "mask": true
+      }
+    ]
+  },
+  "storage": {
+    "files": [
+      {
+        "path": "/opt/bin/csr-approver.sh",
+        "mode": 492,
+        "append": [
+          {
+            "source": "data:text/plain;base64,{{ execute "files/csr_autoapprover.sh" . | base64 }}"
+          }
+        ]
+      },
+      {{ if not .InternalNIC }}
+      {
+        "path": "/etc/NetworkManager/dispatcher.d/pre-up.d/99-add-internal-ip.sh",
+        "mode": 493,
+        "overwrite": true,
+        "contents": {
+          "source": "data:text/plain;base64,{{ execute "files/add-internal-ip-bmh.sh" . | base64 }}"
+        }
+      },
+      {{ end }}
+      {
+        "path": "/etc/systemd/system/crio.service.d/30-nodenet.conf",
+        "mode": 493,
+        "overwrite": true,
+        "contents": {
+          "source": "data:text/plain;base64,{{ execute "files/nodenet-crio.conf" . | base64 }}"
+        }
+      },
+      {
+        "path": "/etc/systemd/system/kubelet.service.d/30-nodenet.conf",
+        "mode": 493,
+        "overwrite": true,
+        "contents": {
+          "source": "data:text/plain;base64,{{ execute "files/nodenet-kubelet.conf" . | base64 }}"
+        }
+      }
+    ]
+  }
+}

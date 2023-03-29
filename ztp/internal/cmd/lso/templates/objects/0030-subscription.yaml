@@ -1,0 +1,10 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  namespace: openshift-local-storage
+  name: local-storage-operator
+spec:
+  channel: stable
+  name: local-storage-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

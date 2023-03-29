@@ -15,10 +15,13 @@ License.
 package internal
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -27,16 +30,18 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clnt "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/jq"
 	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/models"
 )
 
@@ -44,26 +49,24 @@ import (
 // information to the description of a cluster. Don't create instances of this type directly, use
 // the NewEnricher function instead.
 type EnricherBuilder struct {
-	logger logr.Logger
-	client clnt.Client
-	env    map[string]string
+	logger   logr.Logger
+	client   clnt.Client
+	resolver string
 }
 
 // Enricher knows how to add information to the description of a cluster. Don't create instances of
 // this type directly, use the NewEnricher function instead.
 type Enricher struct {
-	logger logr.Logger
-	client clnt.Client
-	env    map[string]string
-	jq     *JQ
+	logger   logr.Logger
+	client   clnt.Client
+	jq       *jq.Tool
+	resolver *net.Resolver
 }
 
 // NewEnricher creates a builder that can then be used to create an object that knows how to add
 // information to the description of a cluster.
 func NewEnricher() *EnricherBuilder {
-	return &EnricherBuilder{
-		env: map[string]string{},
-	}
+	return &EnricherBuilder{}
 }
 
 // SetLogger sets the logger that the enricher will use to write log messages. This is mandatory.
@@ -79,9 +82,23 @@ func (b *EnricherBuilder) SetClient(value clnt.Client) *EnricherBuilder {
 	return b
 }
 
-// SetEnv sets the environment variables that will be used by the enricher.
-func (b *EnricherBuilder) SetEnv(value map[string]string) *EnricherBuilder {
-	b.env = value
+// SetResolver sets the IP address and port number of DNS server that the enricher will resolve
+// names, for example `127.0.0.1:53`. There is usually no need to change this, it is intended for
+// use in unit tests.
+func (b *EnricherBuilder) SetResolver(value string) *EnricherBuilder {
+	b.resolver = value
+	return b
+}
+
+// SetFlags sets the command line flags that that indicate how to configure the enricher. This is
+// optional.
+func (b *EnricherBuilder) SetFlags(flags *pflag.FlagSet) *EnricherBuilder {
+	if flags.Changed(enricherResolverFlagName) {
+		value, err := flags.GetString(enricherResolverFlagName)
+		if err == nil {
+			b.resolver = value
+		}
+	}
 	return b
 }
 
@@ -98,21 +115,46 @@ func (b *EnricherBuilder) Build() (result *Enricher, err error) {
 		return
 	}
 
-	// Create the JQ object:
-	jq, err := NewJQ().
+	// Create the jq tool:
+	jq, err := jq.NewTool().
 		SetLogger(b.logger).
 		Build()
 	if err != nil {
-		err = fmt.Errorf("failed to create jq object: %v", err)
+		err = fmt.Errorf("failed to create jq tool: %w", err)
 		return
+	}
+
+	// Set the default resolver if needed:
+	var resolver *net.Resolver
+	if b.resolver != "" {
+		resolver, err = b.createResolver(b.resolver)
+		if err != nil {
+			err = fmt.Errorf("failed to create resolver: %w", err)
+			return
+		}
 	}
 
 	// Create and populate the object:
 	result = &Enricher{
-		logger: b.logger,
-		client: b.client,
-		env:    maps.Clone(b.env),
-		jq:     jq,
+		logger:   b.logger,
+		client:   b.client,
+		jq:       jq,
+		resolver: resolver,
+	}
+	return
+}
+
+func (b *EnricherBuilder) createResolver(address string) (result *net.Resolver, err error) {
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+	}
+	result = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network string,
+			_ string) (conn net.Conn, err error) {
+			conn, err = dialer.DialContext(ctx, network, address)
+			return
+		},
 	}
 	return
 }
@@ -120,12 +162,12 @@ func (b *EnricherBuilder) Build() (result *Enricher, err error) {
 // Enrich completes the configuration adding the information that will be required later to create
 // the clusters.
 func (e *Enricher) Enrich(ctx context.Context, config *models.Config) error {
-	err := e.enrichProperties(ctx, config.Properties)
+	err := e.enrichConfig(ctx, config)
 	if err != nil {
 		return err
 	}
-	for i := range config.Clusters {
-		err := e.enrichCluster(ctx, &config.Clusters[i])
+	for _, cluster := range config.Clusters {
+		err := e.enrichCluster(ctx, config, cluster)
 		if err != nil {
 			return err
 		}
@@ -133,13 +175,15 @@ func (e *Enricher) Enrich(ctx context.Context, config *models.Config) error {
 	return nil
 }
 
-func (e *Enricher) enrichProperties(ctx context.Context, properties map[string]string) error {
-	setters := []func(context.Context, map[string]string) error{
+func (e *Enricher) enrichConfig(ctx context.Context, config *models.Config) error {
+	setters := []func(context.Context, *models.Config) error{
 		e.setOCPTag,
 		e.setRHCOSRelease,
+		e.setConfigImageSet,
+		e.setConfigRegistry,
 	}
 	for _, setter := range setters {
-		err := setter(ctx, properties)
+		err := setter(ctx, config)
 		if err != nil {
 			return err
 		}
@@ -147,15 +191,15 @@ func (e *Enricher) enrichProperties(ctx context.Context, properties map[string]s
 	return nil
 }
 
-func (e *Enricher) setOCPTag(ctx context.Context, properties map[string]string) error {
+func (e *Enricher) setOCPTag(ctx context.Context, config *models.Config) error {
 	// Do nothing if already set:
-	ocpTag := properties[models.OCPTagProperty]
+	ocpTag := config.Properties[models.OCPTagProperty]
 	if ocpTag != "" {
 		return nil
 	}
 
 	// Check that the version has been specified:
-	ocpVersion := properties[models.OCPVersionProperty]
+	ocpVersion := config.Properties[models.OCPVersionProperty]
 	if ocpVersion == "" {
 		return fmt.Errorf(
 			"failed to set OCP tag because property '%s' hasn't been specified",
@@ -167,8 +211,8 @@ func (e *Enricher) setOCPTag(ctx context.Context, properties map[string]string) 
 	ocpTag = fmt.Sprintf("%s-x86_64", ocpVersion)
 
 	// Update the properties:
-	properties[models.OCPTagProperty] = ocpTag
-	e.logger.V(2).Info(
+	config.Properties[models.OCPTagProperty] = ocpTag
+	e.logger.Info(
 		"Set OCP tag property",
 		"name", models.OCPTagProperty,
 		"value", ocpTag,
@@ -176,15 +220,15 @@ func (e *Enricher) setOCPTag(ctx context.Context, properties map[string]string) 
 	return nil
 }
 
-func (e *Enricher) setRHCOSRelease(ctx context.Context, properties map[string]string) error {
+func (e *Enricher) setRHCOSRelease(ctx context.Context, config *models.Config) error {
 	// Do nothing if it is already set:
-	rhcosRelease := properties[models.OCPRCHOSReleaseProperty]
+	rhcosRelease := config.Properties[models.OCPRCHOSReleaseProperty]
 	if rhcosRelease != "" {
 		return nil
 	}
 
 	// Check that the version has been specified:
-	ocpVersion := properties[models.OCPVersionProperty]
+	ocpVersion := config.Properties[models.OCPVersionProperty]
 	if ocpVersion == "" {
 		return fmt.Errorf(
 			"failed to set RHCOS release because property '%s' hasn't been specified",
@@ -193,7 +237,7 @@ func (e *Enricher) setRHCOSRelease(ctx context.Context, properties map[string]st
 	}
 
 	// Download the `release.txt` file:
-	releaseTXT, err := e.downloadReleaseTXT(ctx, properties)
+	releaseTXT, err := e.downloadReleaseTXT(ctx, config)
 	if err != nil {
 		return err
 	}
@@ -206,7 +250,7 @@ func (e *Enricher) setRHCOSRelease(ctx context.Context, properties map[string]st
 	rchosRelease := rhcosReleaseMatches[1]
 
 	// Update the properties:
-	properties[models.OCPRCHOSReleaseProperty] = rchosRelease
+	config.Properties[models.OCPRCHOSReleaseProperty] = rchosRelease
 	e.logger.Info(
 		"Set RHCOS release property",
 		"name", models.OCPRCHOSReleaseProperty,
@@ -216,13 +260,13 @@ func (e *Enricher) setRHCOSRelease(ctx context.Context, properties map[string]st
 	return nil
 }
 
-func (e *Enricher) downloadReleaseTXT(ctx context.Context, properties map[string]string) (result string,
+func (e *Enricher) downloadReleaseTXT(ctx context.Context, config *models.Config) (result string,
 	err error) {
-	mirror := properties[models.OCPMirrorProperty]
+	mirror := config.Properties[models.OCPMirrorProperty]
 	if mirror == "" {
 		mirror = enricherDefaultMirror
 	}
-	version := properties[models.OCPVersionProperty]
+	version := config.Properties[models.OCPVersionProperty]
 	url := fmt.Sprintf(
 		"%s/%s/release.txt",
 		mirror, version,
@@ -245,29 +289,116 @@ func (e *Enricher) downloadReleaseTXT(ctx context.Context, properties map[string
 		return
 	}
 	result = string(data)
-	e.logger.V(2).Info(
-		"Downloaded 'release.txt' file",
+	e.logger.Info(
+		"Downloaded release file",
 		"url", url,
-		"text", result,
+	)
+	e.logger.V(2).Info(
+		"Release file content",
+		"content", string(result),
 	)
 	return
 }
 
-func (e *Enricher) enrichCluster(ctx context.Context, cluster *models.Cluster) error {
-	setters := []func(context.Context, *models.Cluster) error{
+func (e *Enricher) setConfigImageSet(ctx context.Context, config *models.Config) error {
+	// Do nothing if it is already set:
+	imageSet := config.Properties[models.ClusterImageSetProperty]
+	if imageSet != "" {
+		return nil
+	}
+
+	// Check that the OCP version is set:
+	ocpVersion := config.Properties[models.OCPVersionProperty]
+	if ocpVersion == "" {
+		return fmt.Errorf(
+			"failed to set image set release because property '%s' hasn't been "+
+				"specified",
+			models.OCPVersionProperty,
+		)
+	}
+
+	// Calculate the default value and save
+	imageSet = fmt.Sprintf("openshift-v%s", ocpVersion)
+	config.Properties[models.ClusterImageSetProperty] = imageSet
+	e.logger.Info(
+		"Set image set property",
+		"name", models.ClusterImageSetProperty,
+		"value", imageSet,
+	)
+
+	return nil
+}
+
+func (e *Enricher) setConfigRegistry(ctx context.Context, config *models.Config) error {
+	// Do nothing if it is already set:
+	registry := config.Properties[models.RegistryProperty]
+	if registry != "" {
+		return nil
+	}
+
+	// Get the default registry URL from the configuration of the registry:
+	registryConfig := &corev1.ConfigMap{}
+	registryKey := clnt.ObjectKey{
+		Namespace: "ztpfw-registry",
+		Name:      "ztpfw-config",
+	}
+	err := e.client.Get(ctx, registryKey, registryConfig)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	uriData, ok := registryConfig.Data["uri"]
+	if !ok {
+		return fmt.Errorf(
+			"failed to find registry URI because configmap '%s/%s' doesn't have the "+
+				"'uri' key",
+			registryConfig.Namespace, registryConfig.Name,
+		)
+	}
+	uriBytes, err := base64.StdEncoding.DecodeString(uriData)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to decode registry URI '%s': %w",
+			string(uriBytes), err,
+		)
+	}
+	uriText := strings.TrimSpace(string(uriBytes))
+
+	// Save the value:
+	config.Properties[models.RegistryProperty] = uriText
+	e.logger.Info(
+		"Set registry property",
+		"name", models.RegistryProperty,
+		"value", uriText,
+	)
+
+	return nil
+}
+
+func (e *Enricher) enrichCluster(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	setters := []func(context.Context, *models.Config, *models.Cluster) error{
 		e.setSNO,
 		e.setPullSecret,
 		e.setSSHKeys,
 		e.setDNSDomain,
-		e.setImageSet,
-		e.setVIPs,
+		e.setInternalAPIIP,
+		e.setInternalIngressIP,
 		e.setNetworks,
-		e.setInternalIPs,
-		e.setExternalIPs,
+		e.setInternalNodeIPs,
+		e.setExternalNodeIPs,
 		e.setKubeconfig,
+		e.setClusterImageSet,
+		e.setClusterRegistryURL,
+		e.setClusterRegistryCA,
+		e.setHostnames,
+		e.setExternalAPIIP,
+		e.setExternalIngressIP,
 	}
 	for _, setter := range setters {
-		err := setter(ctx, cluster)
+		err := setter(ctx, config, cluster)
 		if err != nil {
 			return err
 		}
@@ -275,7 +406,8 @@ func (e *Enricher) enrichCluster(ctx context.Context, cluster *models.Cluster) e
 	return nil
 }
 
-func (e *Enricher) setSNO(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setSNO(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	count := 0
 	for _, node := range cluster.Nodes {
 		if node.Kind == models.NodeKindControlPlane {
@@ -286,7 +418,8 @@ func (e *Enricher) setSNO(ctx context.Context, cluster *models.Cluster) error {
 	return nil
 }
 
-func (e *Enricher) setPullSecret(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setPullSecret(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	if cluster.PullSecret != nil {
 		return nil
 	}
@@ -297,21 +430,23 @@ func (e *Enricher) setPullSecret(ctx context.Context, cluster *models.Cluster) e
 	}
 	err := e.client.Get(ctx, key, secret)
 	if err != nil {
-		return fmt.Errorf("failed to get pull secret: %v", err)
+		return fmt.Errorf("failed to get pull secret: %w", err)
 	}
 	data, ok := secret.Data[".dockerconfigjson"]
 	if !ok {
 		return fmt.Errorf("pull secret doesn't contain the '.dockerconfigjson' key")
 	}
-	e.logger.V(1).Info(
-		"Loaded pull secret",
-		"secret", string(data),
-	)
 	cluster.PullSecret = data
+	e.logger.Info(
+		"Loaded pull secret",
+		"secret", fmt.Sprintf("%s/%s", secret.Namespace, secret.Name),
+		"!content", string(cluster.PullSecret),
+	)
 	return nil
 }
 
-func (e *Enricher) setSSHKeys(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setSSHKeys(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	// Do nothing if the keys are already set:
 	if cluster.SSH.PublicKey != nil && cluster.SSH.PrivateKey != nil {
 		return nil
@@ -328,16 +463,20 @@ func (e *Enricher) setSSHKeys(ctx context.Context, cluster *models.Cluster) erro
 	case err == nil:
 		cluster.SSH.PublicKey = secret.Data["id_rsa.pub"]
 		cluster.SSH.PrivateKey = secret.Data["id_rsa.key"]
-		e.logger.V(1).Info(
-			"Found SSH keys",
+		e.logger.Info(
+			"Loaded SSH keys",
 			"cluster", cluster.Name,
 			"secret", fmt.Sprintf("%s/%s", secret.Namespace, secret.Name),
+			"public", string(cluster.SSH.PublicKey),
+			"!private", string(cluster.SSH.PrivateKey),
 		)
 	case apierrors.IsNotFound(err):
 		cluster.SSH.PublicKey, cluster.SSH.PrivateKey, err = e.generateSSHKeys()
-		e.logger.V(1).Info(
+		e.logger.Info(
 			"Generated SSH keys",
 			"cluster", cluster.Name,
+			"public", string(cluster.SSH.PublicKey),
+			"!private", string(cluster.SSH.PrivateKey),
 		)
 	}
 	return err
@@ -360,15 +499,16 @@ func (e *Enricher) generateSSHKeys() (publicKey, privateKey []byte, err error) {
 	return
 }
 
-func (e *Enricher) setDNSDomain(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setDNSDomain(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	if cluster.DNS.Domain != "" {
 		return nil
 	}
 	domain, err := e.getDNSDomain(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get DNS domain: %v", err)
+		return fmt.Errorf("failed to get DNS domain: %w", err)
 	}
-	e.logger.V(1).Info(
+	e.logger.Info(
 		"Found DNS domain",
 		"domain", domain,
 	)
@@ -390,6 +530,9 @@ func (e *Enricher) getDNSDomain(ctx context.Context) (result string, err error) 
 	}
 	var domain string
 	err = e.jq.Query(`.status.domain`, object, &domain)
+	if err != nil {
+		return
+	}
 
 	// The domain name used by the ingress controller will be something like
 	// `apps.my-cluster.my-domain.com` and we want to use only `my-domain.com` as the base
@@ -408,52 +551,51 @@ func (e *Enricher) getDNSDomain(ctx context.Context) (result string, err error) 
 	return
 }
 
-func (e *Enricher) setImageSet(ctx context.Context, cluster *models.Cluster) error {
-	if cluster.ImageSet != "" {
+func (e *Enricher) setInternalAPIIP(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	if cluster.API.InternalIP != nil {
 		return nil
 	}
-	value, ok := e.env["CLUSTERIMAGESET"]
-	if !ok {
-		return fmt.Errorf("environment variable 'CLUSTERIMAGESET' isn't set")
-	}
-	e.logger.V(1).Info(
-		"Found cluster image set",
-		"value", value,
+	cluster.API.InternalIP = enricherInternalAPIIP
+	e.logger.Info(
+		"Found internal API IP",
+		"value", cluster.API.InternalIP,
 	)
-	cluster.ImageSet = value
 	return nil
 }
 
-func (e *Enricher) setVIPs(ctx context.Context, cluster *models.Cluster) error {
-	if cluster.SNO {
+func (e *Enricher) setInternalIngressIP(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	if cluster.Ingress.InternalIP != nil {
 		return nil
 	}
-	if cluster.API.VIP == "" {
-		cluster.API.VIP = enricherAPIVIP.String()
-	}
-	if cluster.Ingress.VIP == "" {
-		cluster.Ingress.VIP = enricherIngressVIP.String()
-	}
+	cluster.Ingress.InternalIP = enricherInternalIngressIP
+	e.logger.Info(
+		"Found internal ingress IP",
+		"value", cluster.Ingress.InternalIP,
+	)
 	return nil
 }
 
-func (e *Enricher) setNetworks(ctx context.Context, cluster *models.Cluster) error {
-	cluster.ClusterNetworks = []models.ClusterNetwork{{
+func (e *Enricher) setNetworks(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	cluster.ClusterNetworks = []*models.ClusterNetwork{{
 		CIDR:       enricherClusterCIDR,
 		HostPrefix: enricherHostPrefix,
 	}}
-	cluster.MachineNetworks = []models.MachineNetwork{{
+	cluster.MachineNetworks = []*models.MachineNetwork{{
 		CIDR: enricherMachineCIDR,
 	}}
-	cluster.ServiceNetworks = []models.ServiceNetwork{{
+	cluster.ServiceNetworks = []*models.ServiceNetwork{{
 		CIDR: enricherServiceCIDR,
 	}}
 	return nil
 }
 
-func (e *Enricher) setInternalIPs(ctx context.Context, cluster *models.Cluster) error {
-	for i := range cluster.Nodes {
-		err := e.setInternalIP(ctx, i, &cluster.Nodes[i])
+func (e *Enricher) setInternalNodeIPs(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	for i, node := range cluster.Nodes {
+		err := e.setInternalNodeIP(ctx, i, node)
 		if err != nil {
 			return err
 		}
@@ -461,24 +603,28 @@ func (e *Enricher) setInternalIPs(ctx context.Context, cluster *models.Cluster) 
 	return nil
 }
 
-func (e *Enricher) setInternalIP(ctx context.Context, index int, node *models.Node) error {
+func (e *Enricher) setInternalNodeIP(ctx context.Context, index int, node *models.Node) error {
 	// Do nothing if the IP is already set:
-	if node.InternalNIC.IP != nil {
+	if node.InternalIP != nil {
 		return nil
 	}
 
 	// For nodes of the cluster we want to assign IP addresses within the machine network
 	// 192.168.7.0/24, starting with 192.168.7.10 for the first master node, 192.168.7.11 for
 	// the second one, and so on.
-	ip := slices.Clone(enricherMachineCIDR.IP)
-	ip[len(ip)-1] = byte(10 + index)
-	node.InternalNIC.IP = ip
-	node.InternalNIC.Prefix, _ = enricherMachineCIDR.Mask.Size()
+	address := slices.Clone(enricherMachineCIDR.IP)
+	address[len(address)-1] = byte(10 + index)
+	prefix, _ := enricherMachineCIDR.Mask.Size()
+	node.InternalIP = &models.IP{
+		Address: address,
+		Prefix:  prefix,
+	}
 
 	return nil
 }
 
-func (e *Enricher) setExternalIPs(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setExternalNodeIPs(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	// Fetch the agents for the nodes of the cluster:
 	agents := &unstructured.UnstructuredList{}
 	agents.SetGroupVersionKind(AgentListGVK)
@@ -497,8 +643,7 @@ func (e *Enricher) setExternalIPs(ctx context.Context, cluster *models.Cluster) 
 		var pairs []Pair
 		err = e.jq.Query(
 			`
-				try
-				.status.inventory.interfaces[] |
+				.status.inventory.interfaces[]? |
 				{ "mac": .macAddress, "ip": .ipV4Addresses[0] }
 			`,
 			agent.Object, &pairs,
@@ -513,29 +658,36 @@ func (e *Enricher) setExternalIPs(ctx context.Context, cluster *models.Cluster) 
 		}
 	}
 
-	// Find the IP address for each external interface:
-	for i, node := range cluster.Nodes {
-		if node.ExternalNIC.IP != nil {
+	// Find the external IP addresses of the nodes:
+	for _, node := range cluster.Nodes {
+		if node.ExternalNIC == nil {
+			continue
+		}
+		if node.ExternalIP != nil {
 			continue
 		}
 		mac := node.ExternalNIC.MAC
 		ip, ok := index[strings.ToLower(mac)]
 		if ok {
-			e.logger.V(1).Info(
+			e.logger.Info(
 				"Found external IP address for node",
 				"cluster", cluster.Name,
 				"node", node.Name,
 				"mac", mac,
 				"ip", ip,
 			)
-			cluster.Nodes[i].ExternalNIC.IP = net.ParseIP(ip)
+			node.ExternalIP, err = models.ParseIP(ip)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-func (e *Enricher) setKubeconfig(ctx context.Context, cluster *models.Cluster) error {
+func (e *Enricher) setKubeconfig(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
 	if cluster.Kubeconfig != nil {
 		return nil
 	}
@@ -554,12 +706,293 @@ func (e *Enricher) setKubeconfig(ctx context.Context, cluster *models.Cluster) e
 	data, ok := secret.Data["kubeconfig"]
 	if ok {
 		cluster.Kubeconfig = data
-		e.logger.V(1).Info(
-			"Found kubeconfig",
+		e.logger.Info(
+			"Loaded kubeconfig",
 			"cluster", cluster.Name,
+			"secret", fmt.Sprintf("%s/%s", secret.Namespace, secret.Name),
+			"!content", string(cluster.Kubeconfig),
 		)
 	}
 	return nil
+}
+
+func (e *Enricher) setClusterImageSet(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	// Do nothing if it is already set:
+	if cluster.ImageSet != "" {
+		return nil
+	}
+
+	// Check that the value is in the properties:
+	imageSet := config.Properties[models.ClusterImageSetProperty]
+	if imageSet == "" {
+		return fmt.Errorf(
+			"failed to set image set for cluster '%s' because image set property '%s' "+
+				"hasn't been specified",
+			cluster.Name, models.ClusterImageSetProperty,
+		)
+	}
+
+	// Set the value:
+	cluster.ImageSet = imageSet
+	e.logger.Info(
+		"Set cluster image set",
+		"value", imageSet,
+	)
+
+	return nil
+}
+
+func (e *Enricher) setClusterRegistryURL(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	// Do nothing if it is already set:
+	if cluster.Registry.URL != "" {
+		return nil
+	}
+
+	// Do nothing if there isn't a custom registry in the configuration:
+	registry := config.Properties[models.RegistryProperty]
+	if registry == "" {
+		return nil
+	}
+
+	// Set the value:
+	cluster.Registry.URL = registry
+	e.logger.Info(
+		"Set cluster registry URL",
+		"value", registry,
+	)
+
+	return nil
+}
+
+func (e *Enricher) setClusterRegistryCA(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	// Do nothing if it is already set:
+	if cluster.Registry.CA != nil {
+		return nil
+	}
+
+	// Do nothing if the URL isn't set:
+	if cluster.Registry.URL == "" {
+		return nil
+	}
+
+	// The registry URL may not contain a port number, but it is required to connect with TLS
+	// and obtain the CA certificates, so we need to add a default:
+	uri := cluster.Registry.URL
+	colon := strings.LastIndex(uri, ":")
+	if colon == -1 {
+		uri = fmt.Sprintf("%s:443", uri)
+	}
+
+	// Set the value:
+	ca, err := e.getCA(uri)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to get registry CA certificates for registry '%s' of "+
+				"cluster '%s': %w",
+			uri, cluster.Name, err,
+		)
+	}
+	cluster.Registry.CA = ca
+	e.logger.Info("Found cluster registry CA")
+	e.logger.V(2).Info(
+		"Cluster registry CA content",
+		"content", string(cluster.Registry.CA),
+	)
+	return nil
+}
+
+func (e *Enricher) setExternalAPIIP(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	// Do nothing if the IP is already set:
+	if cluster.API.ExternalIP != nil {
+		return nil
+	}
+
+	// Check that the DNS domain is set:
+	if cluster.DNS.Domain == "" {
+		return fmt.Errorf("failed to set external API IP because DNS domain isn't set")
+	}
+
+	// Try to find the IP address for the domain:
+	domain := fmt.Sprintf("api.%s.%s", cluster.Name, cluster.DNS.Domain)
+	address, err := e.resolveDomain(ctx, domain)
+	if err != nil {
+		return err
+	}
+	cluster.API.ExternalIP = net.ParseIP(address)
+	e.logger.Info(
+		"Found external API IP",
+		"value", cluster.API.ExternalIP,
+	)
+
+	return nil
+}
+
+func (e *Enricher) setExternalIngressIP(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	// Do nothing if the IP is already set:
+	if cluster.Ingress.ExternalIP != nil {
+		return nil
+	}
+
+	// Check that the DNS domain is set:
+	if cluster.DNS.Domain == "" {
+		return fmt.Errorf("failed to set external ingress IP because DNS domain isn't set")
+	}
+
+	// Try to find the IP address for the domain:
+	domain := fmt.Sprintf("apps.%s.%s", cluster.Name, cluster.DNS.Domain)
+	address, err := e.resolveDomain(ctx, domain)
+	if err != nil {
+		return err
+	}
+	cluster.Ingress.ExternalIP = net.ParseIP(address)
+	e.logger.Info(
+		"Found external ingress IP",
+		"value", cluster.Ingress.ExternalIP,
+	)
+
+	return nil
+}
+
+func (e *Enricher) getCA(address string) (result []byte, err error) {
+	// Connect to the server and do the TLS handshake to obtain the certificate chain:
+	conn, err := tls.Dial("tcp", address, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	certs := conn.ConnectionState().PeerCertificates
+
+	// Serialize the certificates:
+	buffer := &bytes.Buffer{}
+	for _, cert := range certs {
+		err = pem.Encode(buffer, &pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: cert.Raw,
+		})
+		if err != nil {
+			return
+		}
+	}
+	result = buffer.Bytes()
+
+	return
+}
+
+func (e *Enricher) setHostnames(ctx context.Context, config *models.Config,
+	cluster *models.Cluster) error {
+	for _, node := range cluster.Nodes {
+		err := e.setHostname(ctx, config, cluster, node)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Enricher) setHostname(ctx context.Context, config *models.Config,
+	cluster *models.Cluster, node *models.Node) error {
+	if node.Hostname != "" {
+		return nil
+	}
+	var kind string
+	switch node.Kind {
+	case models.NodeKindControlPlane:
+		kind = "master"
+	case models.NodeKindWorker:
+		kind = "worker"
+	default:
+		return fmt.Errorf(
+			"failed to set hostname for node '%s' of cluster '%s' because node "+
+				"kind '%s' is unknown",
+			node.Name, cluster.Name, node.Kind,
+		)
+	}
+	node.Hostname = fmt.Sprintf("ztpfw-%s-%s-%s", cluster.Name, kind, node.Index())
+	return nil
+}
+
+func (e *Enricher) resolveDomain(ctx context.Context, domain string) (result string, err error) {
+	// First try to use the default resolver:
+	resolver := e.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	addresses, err := resolver.LookupHost(ctx, domain)
+	if err == nil {
+		result = addresses[0]
+		e.logger.V(1).Info(
+			"Default resolver succeeded",
+			"domain", domain,
+			"address", result,
+		)
+		return
+	}
+	e.logger.V(1).Info(
+		"Default resolver failed",
+		"domain", domain,
+		"error", err,
+	)
+
+	// Find the IP addresses of the nodes of the hub:
+	nodes := &corev1.NodeList{}
+	err = e.client.List(ctx, nodes)
+	if err != nil {
+		return
+	}
+	var servers []string
+	err = e.jq.Query(
+		`.items[].status.addresses[] | select(.type == "InternalIP") | .address`,
+		nodes, &servers,
+	)
+	if err != nil {
+		return
+	}
+
+	// Try with each of the IP addresses of the nodes of the hub:
+	dialer := &net.Dialer{}
+	for _, server := range servers {
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network string,
+				address string) (conn net.Conn, err error) {
+				conn, err = dialer.DialContext(
+					ctx,
+					network,
+					net.JoinHostPort(server, "53"),
+				)
+				return
+			},
+		}
+		var addresses []string
+		addresses, err = resolver.LookupHost(ctx, domain)
+		if err == nil {
+			result = addresses[0]
+			e.logger.V(1).Info(
+				"Node resolver succeeded",
+				"server", server,
+				"domain", domain,
+				"address", result,
+			)
+			return
+		}
+		e.logger.V(1).Info(
+			"Node resolver failed",
+			"server", server,
+			"domain", domain,
+			"error", err,
+		)
+	}
+
+	// If we are here we failed to resolve:
+	err = fmt.Errorf("failed to resolve domain '%s'", domain)
+	return
 }
 
 // Hardcoded blocks of addresses used by the cluster, the machines and the services (assigned in the
@@ -570,10 +1003,10 @@ var (
 	enricherServiceCIDR *net.IPNet
 )
 
-// Hardcoded virtual IP addresses (assigned in the init function below).
+// Hardcoded internal API and ingress IP addresses (assigned in the init function below).
 var (
-	enricherAPIVIP     net.IP
-	enricherIngressVIP net.IP
+	enricherInternalAPIIP     net.IP
+	enricherInternalIngressIP net.IP
 )
 
 // Harccoded prefix for the block of addressed assigned to the hosts of the cluster.
@@ -596,15 +1029,15 @@ func init() {
 		panic(err)
 	}
 
-	// Assign the virtual IP addresses, 192.168.7.242 for the API and 192.168.7.243 for the
-	// ingress.
-	enricherAPIVIP = slices.Clone(enricherMachineCIDR.IP)
-	enricherAPIVIP[len(enricherAPIVIP)-1] = 242
-	enricherIngressVIP = slices.Clone(enricherMachineCIDR.IP)
-	enricherIngressVIP[len(enricherIngressVIP)-1] = 243
+	// Assign the internal IP addresses, 192.168.7.242 for the ingress and 192.168.7.243 for the
+	// API.
+	enricherInternalIngressIP = slices.Clone(enricherMachineCIDR.IP)
+	enricherInternalIngressIP[len(enricherInternalIngressIP)-1] = 242
+	enricherInternalAPIIP = slices.Clone(enricherMachineCIDR.IP)
+	enricherInternalAPIIP[len(enricherInternalAPIIP)-1] = 243
 }
 
-// enricherDefaultMirror is the debault base URL for downloading the `release.txt` files, used when
+// enricherDefaultMirror is the default base URL for downloading the `release.txt` files, used when
 // the `OC_OCP_MIRROR` property isn't set.
 const enricherDefaultMirror = "https://mirror.openshift.com/pub/openshift-v4/clients/ocp"
 

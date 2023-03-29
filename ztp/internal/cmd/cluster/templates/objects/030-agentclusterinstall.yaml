@@ -1,0 +1,57 @@
+apiVersion: extensions.hive.openshift.io/v1beta1
+kind: AgentClusterInstall
+metadata:
+  namespace: {{ .Cluster.Name }}
+  name: {{ .Cluster.Name }}
+spec:
+  clusterDeploymentRef:
+    name: {{ .Cluster.Name }}
+  manifestsConfigMapRef:
+    name: {{ .Cluster.Name }}-manifests-override
+  imageSetRef:
+    name: {{ .Cluster.ImageSet }}
+  fips: true
+
+  {{ if .Cluster.TPM }}
+  diskEncryption:
+    mode: tpmv2
+    enableOn: all
+  {{ end}}
+
+  {{ if not .Cluster.SNO }}
+  apiVIP: {{ .Cluster.API.InternalIP }}
+  ingressVIP: {{ .Cluster.Ingress.InternalIP }}
+  networking:
+    networkType: OVNKubernetes
+    clusterNetwork:
+    {{ range .Cluster.ClusterNetworks }}
+    - cidr: {{ .CIDR }}
+      hostPrefix: {{ .HostPrefix }}
+    {{ end}}
+    serviceNetwork:
+    {{ range .Cluster.ServiceNetworks }}
+    - {{ .CIDR }}
+    {{ end }}
+  provisionRequirements:
+    controlPlaneAgents: {{len .Cluster.ControlPlaneNodes}}
+    workerAgents: {{len .Cluster.WorkerNodes}}
+  {{ else }}
+  networking:
+    clusterNetwork:
+    {{ range .Cluster.ClusterNetworks }}
+    - cidr: {{ .CIDR }}
+      hostPrefix: {{ .HostPrefix }}
+    {{ end}}
+    serviceNetwork:
+    {{ range .Cluster.ServiceNetworks }}
+    - {{ .CIDR }}
+    {{ end }}
+    machineNetwork:
+    {{ range .Cluster.MachineNetworks }}
+    - cidr: {{ .CIDR }}
+    {{ end }}
+  provisionRequirements:
+    controlPlaneAgents: 1
+  {{ end }}
+
+  sshPublicKey: {{ .Cluster.SSH.PublicKey | printf "%s" }}

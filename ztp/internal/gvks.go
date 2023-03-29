@@ -26,12 +26,19 @@ var (
 	}
 	AgentListGVK = listGVK(AgentGVK)
 
-	AgentClusterIntallGVK = schema.GroupVersionKind{
+	AgentClusterInstallGVK = schema.GroupVersionKind{
 		Group:   "extensions.hive.openshift.io",
 		Version: "v1beta1",
 		Kind:    "AgentClusterInstall",
 	}
-	AgentClusterIntallListGVK = listGVK(AgentClusterIntallGVK)
+	AgentClusterInstallListGVK = listGVK(AgentClusterInstallGVK)
+
+	BackingStoreGVK = schema.GroupVersionKind{
+		Group:   "noobaa.io",
+		Version: "v1alpha1",
+		Kind:    "BackingStore",
+	}
+	BackingStoreListGVK = listGVK(BackingStoreGVK)
 
 	BareMetalHostGVK = schema.GroupVersionKind{
 		Group:   "metal3.io",
@@ -39,6 +46,13 @@ var (
 		Kind:    "BareMetalHost",
 	}
 	BareMetalHostListGVK = listGVK(BareMetalHostGVK)
+
+	CatalogSourceGVK = schema.GroupVersionKind{
+		Group:   "operators.coreos.com",
+		Version: "v1alpha1",
+		Kind:    "CatalogSource",
+	}
+	CatalogSourceListGVK = listGVK(CatalogSourceGVK)
 
 	ClusterDeploymentGVK = schema.GroupVersionKind{
 		Group:   "hive.openshift.io",
@@ -54,6 +68,13 @@ var (
 	}
 	CustomResourceDefinitionListGVK = listGVK(CustomResourceDefinitionGVK)
 
+	ImageConfigGVK = schema.GroupVersionKind{
+		Group:   "config.openshift.io",
+		Version: "v1",
+		Kind:    "Image",
+	}
+	ImageConfigListGVK = listGVK(ImageConfigGVK)
+
 	InfraEnvGKV = schema.GroupVersionKind{
 		Group:   "agent-install.openshift.io",
 		Version: "v1beta1",
@@ -67,6 +88,20 @@ var (
 		Kind:    "IngressController",
 	}
 	IngressControllerListGVK = listGVK(IngressControllerGVK)
+
+	LocalVolumeGVK = schema.GroupVersionKind{
+		Group:   "local.storage.openshift.io",
+		Version: "v1",
+		Kind:    "LocalVolume",
+	}
+	LocalVolumeListGVK = listGVK(LocalVolumeGVK)
+
+	LVMClusterGVK = schema.GroupVersionKind{
+		Group:   "lvm.topolvm.io",
+		Version: "v1alpha1",
+		Kind:    "LVMCluster",
+	}
+	LVMClusterListGVK = listGVK(LVMClusterGVK)
 
 	ManagedClusterGVK = schema.GroupVersionKind{
 		Group:   "cluster.open-cluster-management.io",
@@ -88,6 +123,27 @@ var (
 		Kind:    "NMStateConfig",
 	}
 	NMStateConfigListGVK = listGVK(NMStateConfigGVK)
+
+	QuayRegistryGVK = schema.GroupVersionKind{
+		Group:   "quay.redhat.com",
+		Version: "v1",
+		Kind:    "QuayRegistry",
+	}
+	QuayRegistryListGVK = listGVK(QuayRegistryGVK)
+
+	RouteGVK = schema.GroupVersionKind{
+		Group:   "route.openshift.io",
+		Version: "v1",
+		Kind:    "Route",
+	}
+	RouteListGVK = listGVK(RouteGVK)
+
+	StorageClusterGVK = schema.GroupVersionKind{
+		Group:   "ocs.openshift.io",
+		Version: "v1",
+		Kind:    "StorageCluster",
+	}
+	StorageClusterListGVK = listGVK(StorageClusterGVK)
 )
 
 func listGVK(gvk schema.GroupVersionKind) schema.GroupVersionKind {

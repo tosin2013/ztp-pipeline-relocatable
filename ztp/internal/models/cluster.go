@@ -20,13 +20,55 @@ type Cluster struct {
 	ImageSet        string
 	Ingress         Ingress
 	Name            string
-	Nodes           []Node
+	Nodes           []*Node
 	PullSecret      []byte
 	SNO             bool
 	SSH             SSH
 	TPM             bool
-	ClusterNetworks []ClusterNetwork
-	MachineNetworks []MachineNetwork
-	ServiceNetworks []ServiceNetwork
+	ClusterNetworks []*ClusterNetwork
+	MachineNetworks []*MachineNetwork
+	ServiceNetworks []*ServiceNetwork
 	Kubeconfig      []byte
+	Registry        Registry
+}
+
+// ContorlPlaneNodes returns an slice containing only the control plane nodes of the cluster.
+func (c *Cluster) ControlPlaneNodes() []*Node {
+	var nodes []*Node
+	for _, node := range c.Nodes {
+		if node.Kind == NodeKindControlPlane {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes
+}
+
+// WorkerNodes returns an slice containing only the workr nodes of the cluster.
+func (c *Cluster) WorkerNodes() []*Node {
+	var nodes []*Node
+	for _, node := range c.Nodes {
+		if node.Kind == NodeKindWorker {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes
+}
+
+// LookupNode returns an node with the given name, or nil if there is no such node.
+func (c *Cluster) LookupNode(name string) *Node {
+	for _, node := range c.Nodes {
+		if node.Name == name {
+			return node
+		}
+	}
+	return nil
+}
+
+// NodeNames returns a slice containing the names of the nodes.
+func (c *Cluster) NodeNames() []string {
+	names := make([]string, len(c.Nodes))
+	for i, node := range c.Nodes {
+		names[i] = node.Name
+	}
+	return names
 }

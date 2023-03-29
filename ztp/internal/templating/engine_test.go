@@ -27,6 +27,7 @@ import (
 
 	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/logging"
 	. "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/testing"
+	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/text"
 )
 
 var _ = Describe("Engine", func() {
@@ -468,6 +469,85 @@ var _ = Describe("Engine", func() {
 			Expect(err).ToNot(HaveOccurred())
 			_, err = uuid.Parse(buffer.String())
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("Template function 'data'", func() {
+		It("Generates expected map", func() {
+			// Create the file system:
+			tmp, fsys := TmpFS(
+				"myfile.txt",
+				text.Dedent(`
+					{{ range $name, $age := (data "Joe" 52 "Mary" 53) -}}
+					{{ $name }}: {{ $age }}
+					{{ end -}}
+				`),
+			)
+			defer os.RemoveAll(tmp)
+
+			// Create the engine:
+			engine, err := NewEngine().
+				SetLogger(logger).
+				SetFS(fsys).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			// Execute the template:
+			buffer := &bytes.Buffer{}
+			err = engine.Execute(buffer, "myfile.txt", nil)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(buffer.String()).To(Equal(text.Dedent(`
+				Joe: 52
+				Mary: 53
+			`)))
+		})
+
+		It("Fails if number of arguments isn't even", func() {
+			// Create the file system:
+			tmp, fsys := TmpFS(
+				"myfile.txt",
+				`{{ data "X" 123 "Y" }}`,
+			)
+			defer os.RemoveAll(tmp)
+
+			// Create the engine:
+			engine, err := NewEngine().
+				SetLogger(logger).
+				SetFS(fsys).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			// Execute the template:
+			buffer := &bytes.Buffer{}
+			err = engine.Execute(buffer, "myfile.txt", nil)
+			Expect(err).To(HaveOccurred())
+			msg := err.Error()
+			Expect(msg).To(ContainSubstring("should be even"))
+			Expect(msg).To(ContainSubstring("3"))
+		})
+
+		It("Fails if name isn't a string", func() {
+			// Create the file system:
+			tmp, fsys := TmpFS(
+				"myfile.txt",
+				`{{ data 42 123 "Y" 456 }}`,
+			)
+			defer os.RemoveAll(tmp)
+
+			// Create the engine:
+			engine, err := NewEngine().
+				SetLogger(logger).
+				SetFS(fsys).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			// Execute the template:
+			buffer := &bytes.Buffer{}
+			err = engine.Execute(buffer, "myfile.txt", nil)
+			Expect(err).To(HaveOccurred())
+			msg := err.Error()
+			Expect(msg).To(ContainSubstring("argument 0 should be a string"))
+			Expect(msg).To(ContainSubstring("it is of type int"))
 		})
 	})
 })

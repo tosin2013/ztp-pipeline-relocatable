@@ -1,0 +1,1 @@
+{{ .Cluster.API.InternalIP }} api.{{ .Cluster.Name }}.{{ .Cluster.DNS.Domain }}

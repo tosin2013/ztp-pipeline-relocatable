@@ -1,0 +1,57 @@
+{{ range .Cluster.Nodes }}
+---
+apiVersion: agent-install.openshift.io/v1beta1
+kind: NMStateConfig
+metadata:
+ namespace: {{ $.Cluster.Name }}
+ name: {{ .Hostname }}
+ labels:
+   nmstate_config_cluster_name: {{ $.Cluster.Name }}
+spec:
+  config:
+    interfaces:
+    {{ if .ExternalNIC }}
+    - name: {{ .ExternalNIC.Name }}
+      type: ethernet
+      state: up
+      mac-address: {{ .ExternalNIC.MAC }}
+      mtu: 1500
+      ethernet:
+        auto-negotiation: true
+      ipv4:
+        enabled: true
+        dhcp: true
+        auto-dns: true
+        auto-gateway: true
+        auto-routes: true
+    {{ end }}
+    {{ if .InternalNIC }}
+    - name: {{ .InternalNIC.Name }}
+      type: ethernet
+      state: up
+      mac-address: {{ .InternalNIC.MAC }}
+      mtu: 1500
+      ethernet:
+        auto-negotiation: true
+      ipv4:
+        enabled: true
+        address:
+        - ip: {{ .InternalIP.Address }}
+          prefix-length: {{ .InternalIP.Prefix }}
+      ipv6:
+        enabled: false
+    {{ end }}
+    {{ range .IgnoredNICs }}
+    - name: {{ . }}
+      state: absent
+    {{ end }}
+  interfaces:
+  {{ if .ExternalNIC }}
+  - name: {{ .ExternalNIC.Name }}
+    macAddress: {{ .ExternalNIC.MAC }}
+  {{ end }}
+  {{ if .InternalNIC }}
+  - name: {{ .InternalNIC.Name }}
+    macAddress: {{ .InternalNIC.MAC }}
+  {{ end }}
+{{ end }}

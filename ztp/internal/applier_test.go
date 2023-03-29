@@ -19,12 +19,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2/dsl/core"
+	. "github.com/onsi/ginkgo/v2/dsl/decorators"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,13 +36,14 @@ import (
 
 	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/logging"
 	. "github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/testing"
+	"github.com/rh-ecosystem-edge/ztp-pipeline-relocatable/ztp/internal/text"
 )
 
 var _ = Describe("Applier", func() {
 	var (
 		ctx    context.Context
 		logger logr.Logger
-		client clnt.WithWatch
+		client *Client
 	)
 
 	BeforeEach(func() {
@@ -52,7 +55,7 @@ var _ = Describe("Applier", func() {
 		// Create the logger:
 		logger, err = logging.NewLogger().
 			SetWriter(GinkgoWriter).
-			SetLevel(2).
+			SetLevel(1).
 			Build()
 		Expect(err).ToNot(HaveOccurred())
 
@@ -61,6 +64,14 @@ var _ = Describe("Applier", func() {
 			SetLogger(logger).
 			Build()
 		Expect(err).ToNot(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		var err error
+		if client != nil {
+			err = client.Close()
+			Expect(err).ToNot(HaveOccurred())
+		}
 	})
 
 	Describe("Creation", func() {
@@ -117,7 +128,7 @@ var _ = Describe("Applier", func() {
 			// Create the templates filesystem:
 			tmp, fsys := TmpFS(
 				"objects/my-object.yaml",
-				Dedent(`
+				text.Dedent(`
 					apiVersion: v1
 					kind: Namespace
 					metadata:
@@ -158,7 +169,7 @@ var _ = Describe("Applier", func() {
 			// Create the templates filesystem:
 			tmp, fsys := TmpFS(
 				"objects/my-objects.yaml",
-				Dedent(`
+				text.Dedent(`
 					apiVersion: v1
 					kind: Namespace
 					metadata:
@@ -241,7 +252,7 @@ var _ = Describe("Applier", func() {
 			// Create the templates filesystem:
 			tmp, fsys := TmpFS(
 				"objects/my-object.yaml",
-				Dedent(`
+				text.Dedent(`
 					apiVersion: v1
 					kind: ConfigMap
 					metadata:
@@ -310,7 +321,7 @@ var _ = Describe("Applier", func() {
 			}
 			tmp, fsys := TmpFS(
 				"objects.yaml",
-				Dedent(`
+				text.Dedent(`
 					apiVersion: v1
 					kind: Namespace
 					metadata: 
@@ -339,18 +350,22 @@ var _ = Describe("Applier", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Create the objects:
-			err = applier.Create(ctx, data)
+			err = applier.Apply(ctx, data)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Delete the objects in a separate goroutine with a reasonable timeout.
 			// This is needed because the applier will wait till the object is
 			// completely deleted, and it won't be till we remove the finalizer.
+			waitGroup := &sync.WaitGroup{}
+			waitGroup.Add(1)
+			defer waitGroup.Wait()
 			go func() {
 				defer GinkgoRecover()
 				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
-				err = applier.Delete(ctx, data)
+				err := applier.Delete(ctx, data)
 				Expect(err).ToNot(HaveOccurred())
+				waitGroup.Done()
 			}()
 
 			// Wait till the applier has sent the request to delete the object, so that
@@ -396,16 +411,61 @@ var _ = Describe("Applier", func() {
 		})
 
 		It("Waits for CRD before creating object", func() {
-			// Prepare the template for the CRD:
+			// Create the object in a separate goroutine, as it will block waiting for
+			// the CRD:
+			data := map[string]any{
+				"Group": fmt.Sprintf("example-%s.com", uuid.NewString()),
+			}
+			objectTmp, objectFsys := TmpFS(
+				"object.yaml",
+				text.Dedent(`
+					apiVersion: {{ .Group }}/v1
+					kind: Example
+					metadata:
+					  name: example
+				`),
+			)
+			defer os.RemoveAll(objectTmp)
+			waitFlag := &atomic.Bool{}
+			objectListener := func(event *ApplierEvent) {
+				if event.Type == ApplierWaitingCRD {
+					waitFlag.Store(true)
+				}
+			}
+			objectApplier, err := NewApplier().
+				SetLogger(logger).
+				SetClient(client).
+				SetFS(objectFsys).
+				SetListener(objectListener).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+			defer func() {
+				err := objectApplier.Delete(ctx, data)
+				Expect(err).ToNot(HaveOccurred())
+			}()
+			waitGroup := &sync.WaitGroup{}
+			waitGroup.Add(1)
+			defer waitGroup.Wait()
+			go func() {
+				defer GinkgoRecover()
+				err := objectApplier.Apply(ctx, data)
+				Expect(err).ToNot(HaveOccurred())
+				waitGroup.Done()
+			}()
+
+			// Wait till the object applier is waiting for the CRD:
+			Eventually(waitFlag.Load).Should(BeTrue())
+
+			// Create the CRD:
 			crdTmp, crdFsys := TmpFS(
 				"crd.yaml",
-				Dedent(`
+				text.Dedent(`
 					apiVersion: apiextensions.k8s.io/v1
 					kind: CustomResourceDefinition
 					metadata:
-					  name: examples.example.com
+					  name: examples.{{ .Group }}
 					spec:
-					  group: example.com
+					  group: {{ .Group }}
 					  names:
 					    kind: Example
 					    listKind: ExampleList
@@ -415,57 +475,21 @@ var _ = Describe("Applier", func() {
 					  versions:
 					  - name: v1
 					    served: true
+					    storage: false
+					    schema:
+					      openAPIV3Schema:
+					        type: object
+					        x-kubernetes-preserve-unknown-fields: true
+					  - name: v2
+					    served: true
 					    storage: true
 					    schema:
 					      openAPIV3Schema:
 					        type: object
 					        x-kubernetes-preserve-unknown-fields: true
-
 				`),
 			)
 			defer os.RemoveAll(crdTmp)
-
-			// Prepare the template for the object:
-			objectTmp, objectFsys := TmpFS(
-				"object.yaml",
-				Dedent(`
-					apiVersion: example.com/v1
-					kind: Example
-					metadata:
-					  name: example
-				`),
-			)
-			defer os.RemoveAll(objectTmp)
-
-			// Try to create the object in a separate goroutine, as it should block
-			// waiting for the CRD:
-			waitingFlag := &atomic.Bool{}
-			applierListener := func(event *ApplierEvent) {
-				if event.Type == ApplierWaitingCRD {
-					waitingFlag.Store(true)
-				}
-			}
-			objectApplier, err := NewApplier().
-				SetLogger(logger).
-				SetClient(client).
-				SetFS(objectFsys).
-				SetListener(applierListener).
-				Build()
-			Expect(err).ToNot(HaveOccurred())
-			defer func() {
-				err := objectApplier.Delete(ctx, nil)
-				Expect(err).ToNot(HaveOccurred())
-			}()
-			go func() {
-				defer GinkgoRecover()
-				err := objectApplier.Create(ctx, nil)
-				Expect(err).ToNot(HaveOccurred())
-			}()
-
-			// Wait till the object applier is waiting for the CRD:
-			Eventually(waitingFlag.Load).Should(BeTrue())
-
-			// Create the CRD:
 			crdApplier, err := NewApplier().
 				SetLogger(logger).
 				SetClient(client).
@@ -473,10 +497,10 @@ var _ = Describe("Applier", func() {
 				Build()
 			Expect(err).ToNot(HaveOccurred())
 			defer func() {
-				err := crdApplier.Delete(ctx, nil)
+				err := crdApplier.Delete(ctx, data)
 				Expect(err).ToNot(HaveOccurred())
 			}()
-			err = crdApplier.Create(ctx, nil)
+			err = crdApplier.Apply(ctx, data)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Wait till the object has been created:
@@ -489,10 +513,64 @@ var _ = Describe("Applier", func() {
 			objectKey := clnt.ObjectKey{
 				Name: "example",
 			}
-			Eventually(func(g Gomega) bool {
-				err := client.Get(ctx, objectKey, objectMeta)
-				return err != nil
+			Eventually(func() bool {
+				return client.Get(ctx, objectKey, objectMeta) != nil
 			}).Should(BeTrue())
+
+			// Wait for the applier goroutine to finish:
+			waitGroup.Wait()
 		})
+
+		It("Doesn't wait for ever after creating CRD", func(ctx SpecContext) {
+			// Create the CRD:
+			data := map[string]any{
+				"Group": fmt.Sprintf("example-%s.com", uuid.NewString()),
+			}
+			crdTmp, crdFsys := TmpFS(
+				"crd.yaml",
+				text.Dedent(`
+					apiVersion: apiextensions.k8s.io/v1
+					kind: CustomResourceDefinition
+					metadata:
+					  name: examples.{{ .Group }}
+					spec:
+					  group: {{ .Group }}
+					  names:
+					    kind: Example
+					    listKind: ExampleList
+					    plural: examples
+					    singular: example
+					  scope: Cluster
+					  versions:
+					  - name: v1
+					    served: true
+					    storage: false
+					    schema:
+					      openAPIV3Schema:
+					        type: object
+					        x-kubernetes-preserve-unknown-fields: true
+					  - name: v2
+					    served: true
+					    storage: true
+					    schema:
+					      openAPIV3Schema:
+					        type: object
+					        x-kubernetes-preserve-unknown-fields: true
+				`),
+			)
+			defer os.RemoveAll(crdTmp)
+			crdApplier, err := NewApplier().
+				SetLogger(logger).
+				SetClient(client).
+				SetFS(crdFsys).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+			defer func() {
+				err := crdApplier.Delete(ctx, data)
+				Expect(err).ToNot(HaveOccurred())
+			}()
+			err = crdApplier.Apply(ctx, data)
+			Expect(err).ToNot(HaveOccurred())
+		}, NodeTimeout(10*time.Second))
 	})
 })

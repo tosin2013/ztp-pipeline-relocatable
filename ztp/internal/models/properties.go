@@ -34,3 +34,15 @@ const OCPRCHOSReleaseProperty = "OC_RHCOS_RELEASE"
 // `release.txt` file. The default is to use `https://mirror.openshift.com/pub/openshift-v4/clients/ocp/`
 // and there is usually no need to change it. This is only intended for use in unit tests.
 const OCPMirrorProperty = "OC_OCP_MIRROR"
+
+// ClusterImageSetProperty is the name of the Hive cluster image set that will be used for the
+// installation of the cluster. The default is to calculate it from the OCM version. For example, if
+// the OCP version is `4.10.38` then the value will be `openshift-v4.10.38`.
+const ClusterImageSetProperty = "clusterimageset"
+
+// RegistryProperty is the URL of a custom image registry to use for the clusters.
+const RegistryProperty = "REGISTRY"
+
+// ODFVersionProperty is the name of the property used to define the OpenShift Data Foundation
+// version that should be installed in clusters.
+const ODFVersionProperty = "OC_ODF_VERSION"

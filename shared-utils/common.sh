@@ -335,7 +335,7 @@ function wipe_edge_disks() {
                 storage_disks=$(yq e ".edgeclusters[${index}].[].master${master}.storage_disk" $EDGECLUSTERS_FILE | awk '{print $2}' | xargs echo)
                 for disk in ${storage_disks}; do
                     echo ">>> Wipe disk ${disk} at ${master} ${NODE_IP}"
-                    ${SSH_COMMAND} -i ${RSA_KEY_FILE} core@${NODE_IP} "sudo sgdisk --zap-all $disk;sudo dd if=/dev/zero of=$disk bs=1M count=100 oflag=direct,dsync; sudo blkdiscard $disk"
+                    ${SSH_COMMAND} -i ${RSA_KEY_FILE} core@${NODE_IP%%/*} "sudo wipefs --all --force $disk;"
                 done
                 echo ">>>>"
                 echo "Remove all the existing VolumeGroups"
@@ -361,7 +361,7 @@ function grab_node_ext_ips() {
     EDGE_NODE_NAME=$(oc --kubeconfig=${KUBECONFIG_HUB} get agent -n ${edgecluster} ${agent} -o jsonpath={.spec.hostname})
     master=${EDGE_NODE_NAME##*-}
     CHANGE_EDGE_MASTER_MGMT_INT=$(yq eval ".edgeclusters[${edgeclusternumber}].${edgecluster}.master${master}.nic_ext_dhcp" ${EDGECLUSTERS_FILE})
-    EDGE_NODE_IP_RAW=$(oc --kubeconfig=${KUBECONFIG_HUB} get agent ${agent} -n ${edgecluster} --no-headers -ojson | jq -r "(.status.inventory.interfaces[] | select(.name==\"${CHANGE_EDGE_MASTER_MGMT_INT}\")).ipV4Addresses[] | select(. | contains(\"192.168.7\") | not)")
+    EDGE_NODE_IP_RAW=$(oc --kubeconfig=${KUBECONFIG_HUB} get agent ${agent} -n ${edgecluster} --no-headers -ojson | jq -r "(.status.inventory.interfaces[] | select(.name==\"${CHANGE_EDGE_MASTER_MGMT_INT}\")).ipV4Addresses[] | select(. | contains(\"192.168.7.\") | not)")
     EDGE_NODE_IP=${EDGE_NODE_IP_RAW%%/*}
     echo "$EDGE_NODE_IP"
 }
